@@ -41,7 +41,7 @@ if TF_MAJOR_VERSION < 2:
     raise ImportError("umap.parametric_umap requires Tensorflow >= 2.0") from None
 
 try:
-    import tensorflow_probability as tfp
+    import tensorflow_probability
 except ImportError:
     warn(
         """ Global structure preservation in The umap.parametric_umap package requires 
@@ -66,11 +66,16 @@ class ParametricUMAP(UMAP):
         decoder=None,
         parametric_embedding=True,
         parametric_reconstruction=False,
+        parametric_reconstruction_loss_fcn=tf.keras.losses.BinaryCrossentropy(
+            from_logits=True
+        ),
+        parametric_reconstruction_loss_weight=1.0,
         autoencoder_loss=False,
         reconstruction_validation=None,
         loss_report_frequency=10,
         n_training_epochs=1,
         global_correlation_loss_weight=0,
+        run_eagerly=False,
         keras_fit_kwargs={},
         **kwargs
     ):
@@ -95,6 +100,10 @@ class ParametricUMAP(UMAP):
             Whether the embedder is parametric or non-parametric, by default True
         parametric_reconstruction : bool, optional
             Whether the decoder is parametric or non-parametric, by default False
+        parametric_reconstruction_loss_fcn : bool, optional
+            What loss function to use for parametric reconstruction, by default tf.keras.losses.BinaryCrossentropy
+        parametric_reconstruction_loss_weight : float, optional
+            How to weight the parametric reconstruction loss relative to umap loss, by default 1.0
         autoencoder_loss : bool, optional
             [description], by default False
         reconstruction_validation : array, optional
@@ -105,6 +114,8 @@ class ParametricUMAP(UMAP):
             number of epochs to train for, by default 1
         global_correlation_loss_weight : float, optional
             Whether to additionally train on correlation of global pairwise relationships (>0), by default 0
+        run_eagerly : bool, optional
+            Whether to run tensorflow eagerly
         keras_fit_kwargs : dict, optional
             additional arguments for model.fit (like callbacks), by default {}
         """
@@ -118,12 +129,17 @@ class ParametricUMAP(UMAP):
             parametric_embedding  # nonparametric vs parametric embedding
         )
         self.parametric_reconstruction = parametric_reconstruction
+        self.parametric_reconstruction_loss_fcn = parametric_reconstruction_loss_fcn
+        self.parametric_reconstruction_loss_weight = (
+            parametric_reconstruction_loss_weight
+        )
+        self.run_eagerly = run_eagerly
         self.autoencoder_loss = autoencoder_loss
         self.batch_size = batch_size
         self.loss_report_frequency = (
             loss_report_frequency  # how many times per epoch to report loss in keras
         )
-        if "tfp" in sys.modules:
+        if "tensorflow_probability" in sys.modules:
             self.global_correlation_loss_weight = global_correlation_loss_weight
         else:
             warn(
@@ -167,6 +183,35 @@ class ParametricUMAP(UMAP):
                         )
                     )
                 )
+
+    def fit(self, X, y=None, precomputed_distances=None):
+        if self.metric == "precomputed":
+            if precomputed_distances is None:
+                raise ValueError(
+                    "Precomputed distances must be supplied if metric \
+                    is precomputed."
+                )
+            # prepare X for training the network
+            self._X = X
+            # geneate the graph on precomputed distances
+            return super().fit(precomputed_distances, y)
+        else:
+            return super().fit(X, y)
+
+    def fit_transform(self, X, y=None, precomputed_distances=None):
+
+        if self.metric == "precomputed":
+            if precomputed_distances is None:
+                raise ValueError(
+                    "Precomputed distances must be supplied if metric \
+                    is precomputed."
+                )
+            # prepare X for training the network
+            self._X = X
+            # geneate the graph on precomputed distances
+            return super().fit_transform(precomputed_distances, y)
+        else:
+            return super().fit_transform(X, y)
 
     def transform(self, X):
         """Transform X into the existing embedded space and return that
@@ -294,22 +339,26 @@ class ParametricUMAP(UMAP):
         if self.global_correlation_loss_weight > 0:
             losses["global_correlation"] = distance_loss_corr
             loss_weights["global_correlation"] = self.global_correlation_loss_weight
+            if self.run_eagerly == False:
+                # this is needed to avoid a 'NaN' error bug in tensorflow_probability (v0.12.2)
+                warn("Setting tensorflow to run eagerly for global_correlation_loss.")
+                self.run_eagerly = True
 
         if self.parametric_reconstruction:
-            losses["reconstruction"] = tf.keras.losses.BinaryCrossentropy(
-                from_logits=True
-            )
-            loss_weights["reconstruction"] = 1.0
+            losses["reconstruction"] = self.parametric_reconstruction_loss_fcn
+            loss_weights["reconstruction"] = self.parametric_reconstruction_loss_weight
 
         self.parametric_model.compile(
             optimizer=self.optimizer,
             loss=losses,
             loss_weights=loss_weights,
-            run_eagerly=True,
+            run_eagerly=self.run_eagerly,
         )
-        print("running eagerly")
 
     def _fit_embed_data(self, X, n_epochs, init, random_state):
+
+        if self.metric == "precomputed":
+            X = self._X
 
         # get dimensionality of dataset
         if self.dims is None:
@@ -319,7 +368,7 @@ class ParametricUMAP(UMAP):
             if len(self.dims) > 1:
                 X = np.reshape(X, [len(X)] + list(self.dims))
 
-        if (np.max(X) > 1.0) or (np.min(X) < 0.0) and self.parametric_reconstruction:
+        if self.parametric_reconstruction and (np.max(X) > 1.0 or np.min(X) < 0.0):
             warn(
                 "Data should be scaled to the range 0-1 for cross-entropy reconstruction loss."
             )
@@ -514,7 +563,7 @@ def get_graph_elements(graph_, n_epochs):
     graph.data[graph.data < (graph.data.max() / float(n_epochs))] = 0.0
     graph.eliminate_zeros()
     # get epochs per sample based upon edge probability
-    epochs_per_sample = make_epochs_per_sample(graph.data, n_epochs)
+    epochs_per_sample = n_epochs * graph.data
 
     head = graph.row
     tail = graph.col
@@ -759,7 +808,9 @@ def distance_loss_corr(x, z_x):
 
     # compute correlation
     corr_d = tf.squeeze(
-        tfp.stats.correlation(x=tf.expand_dims(dx, -1), y=tf.expand_dims(dz, -1))
+        tensorflow_probability.stats.correlation(
+            x=tf.expand_dims(dx, -1), y=tf.expand_dims(dz, -1)
+        )
     )
     if tf.math.is_nan(corr_d):
         raise ValueError("NaN values found in correlation loss.")
