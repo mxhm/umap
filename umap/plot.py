@@ -478,9 +478,12 @@ def points(
     width=800,
     height=800,
     show_legend=True,
+    show_parameters=True,
     subset_points=None,
     ax=None,
     alpha=None,
+    datashade=None,
+    plot_dimensions=None,
 ):
     """Plot an embedding as points. Currently this only works
     for 2D embeddings. While there are many optional parameters
@@ -576,6 +579,9 @@ def points(
     show_legend: bool (optional, default True)
         Whether to display a legend of the labels
 
+    show_parameters: bool (optional, default True)
+        Whether to display parameters of UMAP object
+
     subset_points: array, shape (n_samples,) (optional, default None)
         A way to select a subset of points based on an array of boolean
         values.
@@ -586,6 +592,14 @@ def points(
     
     alpha: float (optional, default: None)
         The alpha blending value, between 0 (transparent) and 1 (opaque).
+
+    datashade: bool (optional, default: None)
+        Plot using datashade or matplotlib, or if None, determine based
+        on number of points and plot size.
+
+    plot_dimensions: tuple (optional, default: None)
+        Plot the specified dimensions of the embedding, of if None, plot
+        the first two dimensions.
 
     Returns
     -------
@@ -613,7 +627,13 @@ def points(
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("Alpha must be between 0 and 1 inclusive")
 
-    points = _get_embedding(umap_object)
+    if plot_dimensions is None:
+        points = _get_embedding(umap_object)[:, (0, 1)]
+    else:
+        points = _get_embedding(umap_object)[:, plot_dimensions]
+
+    if points.shape[1] != 2:
+        raise ValueError("Plotting is currently only implemented for 2 embedding dimensions")
 
     if subset_points is not None:
         if len(subset_points) != points.shape[0]:
@@ -629,9 +649,6 @@ def points(
         if values is not None:
             values = values[subset_points]
 
-    if points.shape[1] != 2:
-        raise ValueError("Plotting is currently only implemented for 2D embeddings")
-
     font_color = _select_font_color(background)
 
     if ax is None:
@@ -639,7 +656,10 @@ def points(
         fig = plt.figure(figsize=(width / dpi, height / dpi))
         ax = fig.add_subplot(111)
 
-    if points.shape[0] <= width * height // 10:
+    if datashade is None:
+        datashade = points.shape[0] > width * height // 10
+
+    if not datashade:
         ax = _matplotlib_points(
             points,
             ax,
@@ -677,24 +697,18 @@ def points(
         )
 
     ax.set(xticks=[], yticks=[])
-    if _get_metric(umap_object) != "euclidean":
+    if show_parameters:
+        param_text = "UMAP: "
+        if _get_metric(umap_object) != "euclidean":
+            param_text += "metric={}, ".format(_get_metric(umap_object))
+        param_text += "n_neighbors={}, min_dist={}".format(umap_object.n_neighbors, umap_object.min_dist)
+        if plot_dimensions is not None:
+            param_text += ", dimensions={}".format(plot_dimensions)
+
         ax.text(
             0.99,
             0.01,
-            "UMAP: metric={}, n_neighbors={}, min_dist={}".format(
-                _get_metric(umap_object), umap_object.n_neighbors, umap_object.min_dist
-            ),
-            transform=ax.transAxes,
-            horizontalalignment="right",
-            color=font_color,
-        )
-    else:
-        ax.text(
-            0.99,
-            0.01,
-            "UMAP: n_neighbors={}, min_dist={}".format(
-                umap_object.n_neighbors, umap_object.min_dist
-            ),
+            param_text,
             transform=ax.transAxes,
             horizontalalignment="right",
             color=font_color,
@@ -1214,6 +1228,7 @@ def interactive(
     interactive_text_search_columns=None,
     interactive_text_search_alpha_contrast=0.95,
     alpha=None,
+    plot_dimensions=None,
 ):
     """Create an interactive bokeh plot of a UMAP embedding.
     While static plots are useful, sometimes a plot that
@@ -1351,7 +1366,14 @@ def interactive(
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("Alpha must be between 0 and 1 inclusive")
 
-    points = _get_embedding(umap_object)
+    if plot_dimensions is None:
+        points = _get_embedding(umap_object)[:, (0, 1)]
+    else:
+        points = _get_embedding(umap_object)[:, plot_dimensions]
+
+    if points.shape[1] != 2:
+        raise ValueError("Plotting is currently only implemented for 2 embedding dimensions")
+
     if subset_points is not None:
         if len(subset_points) != points.shape[0]:
             raise ValueError(
@@ -1361,13 +1383,10 @@ def interactive(
             )
         points = points[subset_points]
 
-    if points.shape[1] != 2:
-        raise ValueError("Plotting is currently only implemented for 2D embeddings")
-
     if point_size is None:
-        point_size = 100.0 / np.sqrt(points.shape[0])
+        point_size = 500.0 / np.sqrt(points.shape[0])
 
-    data = pd.DataFrame(_get_embedding(umap_object), columns=("x", "y"))
+    data = pd.DataFrame(points, columns=("x", "y"))
 
     if labels is not None:
         data["label"] = labels
@@ -1408,7 +1427,8 @@ def interactive(
         if hover_data is not None:
             hover_data = hover_data[subset_points]
 
-    if points.shape[0] <= width * height // 10:
+    #if points.shape[0] <= width * height // 10:
+    if points.shape[0] <= width * height // 5:
 
         if hover_data is not None:
             tooltip_dict = {}
@@ -1502,7 +1522,7 @@ def interactive(
 
                 plot = column(text_input, plot)
 
-        # bpl.show(plot)
+        #bpl.show(plot)
     else:
         if hover_data is not None:
             warn(
