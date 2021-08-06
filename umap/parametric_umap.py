@@ -1,7 +1,6 @@
 import numpy as np
 from umap import UMAP
 from warnings import warn, catch_warnings, filterwarnings
-from umap.umap_ import make_epochs_per_sample
 from numba import TypingError
 import os
 from umap.spectral import spectral_layout
@@ -44,13 +43,17 @@ try:
     import tensorflow_probability
 except ImportError:
     warn(
-        """ Global structure preservation in The umap.parametric_umap package requires 
+        """ Global structure preservation in the umap.parametric_umap package requires 
         tensorflow_probability to be installed. You can install tensorflow_probability at
         https://www.tensorflow.org/probability, 
         
         or via
 
         pip install --upgrade tensorflow-probability
+
+        Please ensure to install a version which is compatible to your tensorflow 
+        installation. You can verify the correct release at 
+        https://github.com/tensorflow/probability/releases.
 
         """
     )
@@ -143,8 +146,8 @@ class ParametricUMAP(UMAP):
             self.global_correlation_loss_weight = global_correlation_loss_weight
         else:
             warn(
-                "tensorflow_probability not installed. \
-                Setting global_correlation_loss_weight to zero."
+                "tensorflow_probability not installed or incompatible to current \
+                tensorflow installation. Setting global_correlation_loss_weight to zero."
             )
             self.global_correlation_loss_weight = 0
 
@@ -782,8 +785,7 @@ def umap_loss(
 
 
 def distance_loss_corr(x, z_x):
-    """ Loss based on the distance between elements in a batch
-    """
+    """Loss based on the distance between elements in a batch"""
 
     # flatten data
     x = tf.keras.layers.Flatten()(x)
@@ -928,9 +930,9 @@ def construct_edge_dataset(
     def gather_index(index):
         return X[index]
 
-    # if X is > 2Gb in size, we need to use a different, slower method for
+    # if X is > 512Mb in size, we need to use a different, slower method for
     #    batching data.
-    gather_indices_in_python = True if X.nbytes * 1e-9 > 2 else False
+    gather_indices_in_python = True if X.nbytes * 1e-9 > 0.5 else False
 
     def gather_X(edge_to, edge_from):
         # gather data from indexes (edges) in either numpy of tf, depending on array size
@@ -956,7 +958,7 @@ def construct_edge_dataset(
         """
         The sham generator is a placeholder when all data is already intrinsic to
         the model, but keras wants some input data. Used for non-parametric
-        embedding. 
+        embedding.
         """
 
         def sham_generator():
@@ -1116,8 +1118,8 @@ def load_ParametricUMAP(save_location, verbose=True):
 
 class GradientClippedModel(tf.keras.Model):
     """
-    We need to define a custom keras model here for gradient clipping, 
-    to stabilize training. 
+    We need to define a custom keras model here for gradient clipping,
+    to stabilize training.
     """
 
     def train_step(self, data):
