@@ -337,6 +337,7 @@ def nearest_neighbors(
             low_memory=low_memory,
             n_jobs=n_jobs,
             verbose=verbose,
+            compressed=False,
         )
         knn_indices, knn_dists = knn_search_index.neighbor_graph
 
@@ -941,6 +942,7 @@ def simplicial_set_embedding(
     euclidean_output=True,
     parallel=False,
     verbose=False,
+    tqdm_kwds=None,
 ):
     """Perform a fuzzy simplicial set embedding, using a specified
     initialisation method and then minimizing the fuzzy set cross entropy
@@ -1028,6 +1030,9 @@ def simplicial_set_embedding(
 
     verbose: bool (optional, default False)
         Whether to report information on the current progress of the algorithm.
+
+    tqdm_kwds: dict
+        Key word arguments to be used by the tqdm progress bar.
 
     Returns
     -------
@@ -1166,6 +1171,7 @@ def simplicial_set_embedding(
             verbose=verbose,
             densmap=densmap,
             densmap_kwds=densmap_kwds,
+            tqdm_kwds=tqdm_kwds,
             move_other=True,
         )
     else:
@@ -1186,6 +1192,7 @@ def simplicial_set_embedding(
             output_metric,
             tuple(output_metric_kwds.values()),
             verbose=verbose,
+            tqdm_kwds=tqdm_kwds,
             move_other=True,
         )
     if output_dens:
@@ -1521,8 +1528,9 @@ class UMAP(BaseEstimator):
 
     target_weight: float (optional, default 0.5)
         weighting factor between data topology and target topology. A value of
-        0.0 weights entirely on data, a value of 1.0 weights entirely on target.
-        The default of 0.5 balances the weighting equally between data and target.
+        0.0 weights predominantly on data, a value of 1.0 places a strong emphasis on
+        target. The default of 0.5 balances the weighting equally between data and
+        target.
 
     transform_seed: int (optional, default 42)
         Random seed used for the stochastic aspects of the transform operation.
@@ -1530,6 +1538,9 @@ class UMAP(BaseEstimator):
 
     verbose: bool (optional, default False)
         Controls verbosity of logging.
+
+    tqdm_kwds: dict (optional, defaul None)
+        Key word arguments to be used by the tqdm progress bar.
 
     unique: bool (optional, default False)
         Controls if the rows of your data should be uniqued before being
@@ -1578,6 +1589,14 @@ class UMAP(BaseEstimator):
         UMAP assumption that we have a connected manifold can be problematic when you have points that are maximally
         different from all the rest of your data.  The connected manifold assumption will make such points have perfect
         similarity to a random set of other points.  Too many such points will artificially connect your space.
+
+    precomputed_knn: tuple (optional, default (None,None,None))
+        If the k-nearest neighbors of each point has already been calculated you
+        can pass them in here to save computation time. The number of nearest
+        neighbors in the precomputed_knn must be greater or equal to the
+        n_neighbors parameter. This should be a tuple containing the output
+        of the nearest_neighbors() function or attributes from a previously fit
+        UMAP object; (knn_indices, knn_dists,knn_search_index).
     """
 
     def __init__(
@@ -1612,6 +1631,7 @@ class UMAP(BaseEstimator):
         transform_mode="embedding",
         force_approximation_algorithm=False,
         verbose=False,
+        tqdm_kwds=None,
         unique=False,
         densmap=False,
         dens_lambda=2.0,
@@ -1619,6 +1639,7 @@ class UMAP(BaseEstimator):
         dens_var_shift=0.1,
         output_dens=False,
         disconnection_distance=None,
+        precomputed_knn=(None, None, None),
     ):
         self.n_neighbors = n_neighbors
         self.metric = metric
@@ -1649,6 +1670,7 @@ class UMAP(BaseEstimator):
         self.transform_mode = transform_mode
         self.force_approximation_algorithm = force_approximation_algorithm
         self.verbose = verbose
+        self.tqdm_kwds = tqdm_kwds
         self.unique = unique
 
         self.densmap = densmap
@@ -1657,6 +1679,7 @@ class UMAP(BaseEstimator):
         self.dens_var_shift = dens_var_shift
         self.output_dens = output_dens
         self.disconnection_distance = disconnection_distance
+        self.precomputed_knn = precomputed_knn
 
         self.n_jobs = n_jobs
 
@@ -1874,6 +1897,72 @@ class UMAP(BaseEstimator):
         else:
             raise ValueError("disconnection_distance must either be None or a numeric.")
 
+        if self.tqdm_kwds is None:
+            self.tqdm_kwds = {}
+        else:
+            if isinstance(self.tqdm_kwds, dict) is False:
+                raise ValueError(
+                    "tqdm_kwds must be a dictionary. Please provide valid tqdm "
+                    "parameters as key value pairs. Valid tqdm parameters can be "
+                    "found here: https://github.com/tqdm/tqdm#parameters"
+                )
+        if "desc" not in self.tqdm_kwds:
+            self.tqdm_kwds["desc"] = "Epochs completed"
+        if "bar_format" not in self.tqdm_kwds:
+            bar_f = "{desc}: {percentage:3.0f}%| {bar} {n_fmt}/{total_fmt} [{elapsed}]"
+            self.tqdm_kwds["bar_format"] = bar_f
+
+        if hasattr(self, "knn_dists") and self.knn_dists is not None:
+            if self.unique:
+                raise ValueError(
+                    "unique is not currently available for " "precomputed_knn."
+                )
+            if not isinstance(self.knn_indices, np.ndarray):
+                raise ValueError("precomputed_knn[0] must be ndarray object.")
+            if not isinstance(self.knn_dists, np.ndarray):
+                raise ValueError("precomputed_knn[1] must be ndarray object.")
+            if self.knn_dists.shape != self.knn_indices.shape:
+                raise ValueError(
+                    "precomputed_knn[0] and precomputed_knn[1]"
+                    " must be numpy arrays of the same size."
+                )
+            if not isinstance(self.knn_search_index, NNDescent):
+                raise ValueError(
+                    "precomputed_knn[2] (knn_search_index)"
+                    " must be an NNDescent object."
+                )
+            if self.knn_dists.shape[1] < self.n_neighbors:
+                warn(
+                    "precomputed_knn has a lower number of neighbors than "
+                    "n_neighbors parameter. precomputed_knn will be ignored"
+                    " and the k-nn will be computed normally."
+                )
+                self.knn_indices = None
+                self.knn_dists = None
+                self.knn_search_index = None
+            elif self.knn_dists.shape[0] != self._raw_data.shape[0]:
+                warn(
+                    "precomputed_knn has a different number of samples than the"
+                    " data you are fitting. precomputed_knn will be ignored and"
+                    "the k-nn will be computed normally."
+                )
+                self.knn_indices = None
+                self.knn_dists = None
+                self.knn_search_index = None
+            elif (
+                self.knn_dists.shape[0] < 4096
+                and not self.force_approximation_algorithm
+            ):
+                warn(
+                    "precomputed_knn is meant for large datasets. Since your"
+                    " data is small, precomputed_knn will be ignored and the"
+                    " k-nn will be computed normally."
+                )
+            elif self.knn_dists.shape[1] > self.n_neighbors:
+                # if k for precomputed_knn larger than n_neighbors we simply prune it
+                self.knn_indices = self.knn_indices[:, : self.n_neighbors]
+                self.knn_dists = self.knn_dists[:, : self.n_neighbors]
+
     def _check_custom_metric(self, metric, kwds, data=None):
         # quickly check to determine whether user-defined
         # self.metric/self.output_metric returns both distance and gradient
@@ -1983,7 +2072,7 @@ class UMAP(BaseEstimator):
         }
 
         if result.n_epochs is None:
-            n_epochs = -1
+            n_epochs = None
         else:
             n_epochs = np.max(result.n_epochs)
 
@@ -2006,6 +2095,7 @@ class UMAP(BaseEstimator):
             result.output_dens,
             parallel=False,
             verbose=bool(np.max(result.verbose)),
+            tqdm_kwds=self.tqdm_kwds,
         )
 
         if result.output_dens:
@@ -2052,7 +2142,7 @@ class UMAP(BaseEstimator):
         }
 
         if result.n_epochs is None:
-            n_epochs = -1
+            n_epochs = None
         else:
             n_epochs = np.max(result.n_epochs)
 
@@ -2075,6 +2165,7 @@ class UMAP(BaseEstimator):
             result.output_dens,
             parallel=False,
             verbose=bool(np.max(result.verbose)),
+            tqdm_kwds=self.tqdm_kwds,
         )
 
         if result.output_dens:
@@ -2123,7 +2214,7 @@ class UMAP(BaseEstimator):
         }
 
         if result.n_epochs is None:
-            n_epochs = -1
+            n_epochs = None
         else:
             n_epochs = np.max(result.n_epochs)
 
@@ -2146,6 +2237,7 @@ class UMAP(BaseEstimator):
             result.output_dens,
             parallel=False,
             verbose=bool(np.max(result.verbose)),
+            tqdm_kwds=self.tqdm_kwds,
         )
 
         if result.output_dens:
@@ -2190,6 +2282,10 @@ class UMAP(BaseEstimator):
             init = self.init
 
         self._initial_alpha = self.learning_rate
+
+        self.knn_indices = self.precomputed_knn[0]
+        self.knn_dists = self.precomputed_knn[1]
+        self.knn_search_index = self.precomputed_knn[2]
 
         self._validate_parameters()
 
@@ -2263,7 +2359,7 @@ class UMAP(BaseEstimator):
         random_state = check_random_state(self.random_state)
 
         if self.verbose:
-            print("Construct fuzzy simplicial set")
+            print(ts(), "Construct fuzzy simplicial set")
 
         if self.metric == "precomputed" and self._sparse_data:
             # For sparse precomputed distance matrices, we just argsort the rows to find
@@ -2277,20 +2373,25 @@ class UMAP(BaseEstimator):
                 )
             if not np.all(X.diagonal() == 0):
                 raise ValueError("Non-zero distances from samples to themselves!")
-            self._knn_indices = np.zeros((X.shape[0], self.n_neighbors), dtype=np.int)
-            self._knn_dists = np.zeros(self._knn_indices.shape, dtype=np.float)
-            for row_id in range(X.shape[0]):
-                # Find KNNs row-by-row
-                row_data = X[row_id].data
-                row_indices = X[row_id].indices
-                if len(row_data) < self._n_neighbors:
-                    raise ValueError(
-                        "Some rows contain fewer than n_neighbors distances!"
-                    )
-                row_nn_data_indices = np.argsort(row_data)[: self._n_neighbors]
-                self._knn_indices[row_id] = row_indices[row_nn_data_indices]
-                self._knn_dists[row_id] = row_data[row_nn_data_indices]
-
+            if self.knn_dists is None:
+                self._knn_indices = np.zeros(
+                    (X.shape[0], self.n_neighbors), dtype=np.int
+                )
+                self._knn_dists = np.zeros(self._knn_indices.shape, dtype=np.float)
+                for row_id in range(X.shape[0]):
+                    # Find KNNs row-by-row
+                    row_data = X[row_id].data
+                    row_indices = X[row_id].indices
+                    if len(row_data) < self._n_neighbors:
+                        raise ValueError(
+                            "Some rows contain fewer than n_neighbors distances!"
+                        )
+                    row_nn_data_indices = np.argsort(row_data)[: self._n_neighbors]
+                    self._knn_indices[row_id] = row_indices[row_nn_data_indices]
+                    self._knn_dists[row_id] = row_data[row_nn_data_indices]
+            else:
+                self._knn_indices = self.knn_indices
+                self._knn_dists = self.knn_dists
             # Disconnect any vertices farther apart than _disconnection_distance
             disconnected_index = self._knn_dists >= self._disconnection_distance
             self._knn_indices[disconnected_index] = -1
@@ -2407,24 +2508,27 @@ class UMAP(BaseEstimator):
                 nn_metric = self.metric
             else:
                 nn_metric = self._input_distance_func
-
-            (
-                self._knn_indices,
-                self._knn_dists,
-                self._knn_search_index,
-            ) = nearest_neighbors(
-                X[index],
-                self._n_neighbors,
-                nn_metric,
-                self._metric_kwds,
-                self.angular_rp_forest,
-                random_state,
-                self.low_memory,
-                use_pynndescent=True,
-                n_jobs=self.n_jobs,
-                verbose=self.verbose,
-            )
-
+            if self.knn_dists is None:
+                (
+                    self._knn_indices,
+                    self._knn_dists,
+                    self._knn_search_index,
+                ) = nearest_neighbors(
+                    X[index],
+                    self._n_neighbors,
+                    nn_metric,
+                    self._metric_kwds,
+                    self.angular_rp_forest,
+                    random_state,
+                    self.low_memory,
+                    use_pynndescent=True,
+                    n_jobs=self.n_jobs,
+                    verbose=self.verbose,
+                )
+            else:
+                self._knn_indices = self.knn_indices
+                self._knn_dists = self.knn_dists
+                self._knn_search_index = self.knn_search_index
             # Disconnect any vertices farther apart than _disconnection_distance
             disconnected_index = self._knn_dists >= self._disconnection_distance
             self._knn_indices[disconnected_index] = -1
@@ -2632,6 +2736,7 @@ class UMAP(BaseEstimator):
             self.output_metric in ("euclidean", "l2"),
             self.random_state is None,
             self.verbose,
+            tqdm_kwds=self.tqdm_kwds,
         )
 
     def fit_transform(self, X, y=None):
@@ -2866,6 +2971,7 @@ class UMAP(BaseEstimator):
                 self.negative_sample_rate,
                 self.random_state is None,
                 verbose=self.verbose,
+                tqdm_kwds=self.tqdm_kwds,
             )
         else:
             embedding = optimize_layout_generic(
@@ -2885,6 +2991,7 @@ class UMAP(BaseEstimator):
                 self._output_distance_func,
                 tuple(self._output_metric_kwds.values()),
                 verbose=self.verbose,
+                tqdm_kwds=self.tqdm_kwds,
             )
 
         return embedding
@@ -3052,6 +3159,7 @@ class UMAP(BaseEstimator):
             self._inverse_distance_func,
             tuple(self._metric_kwds.values()),
             verbose=self.verbose,
+            tqdm_kwds=self.tqdm_kwds,
         )
 
         return inv_transformed_points
@@ -3199,9 +3307,11 @@ class UMAP(BaseEstimator):
                 self.output_metric in ("euclidean", "l2"),
                 self.random_state is None,
                 self.verbose,
+                tqdm_kwds=self.tqdm_kwds,
             )
 
         else:
+            self._knn_search_index.prepare()
             self._knn_search_index.update(X)
             self._raw_data = self._knn_search_index._raw_data
             (
@@ -3264,8 +3374,28 @@ class UMAP(BaseEstimator):
                 self.output_metric in ("euclidean", "l2"),
                 self.random_state is None,
                 self.verbose,
+                tqdm_kwds=self.tqdm_kwds,
             )
 
         if self.output_dens:
             self.rad_orig_ = aux_data["rad_orig"]
             self.rad_emb_ = aux_data["rad_emb"]
+
+    def __repr__(self):
+        from sklearn.utils._pprint import _EstimatorPrettyPrinter
+        import re
+
+        pp = _EstimatorPrettyPrinter(
+            compact=True,
+            indent=1,
+            indent_at_name=True,
+            n_max_elements_to_show=50,
+        )
+        pp._changed_only = True
+        repr_ = pp.pformat(self)
+        repr_ = re.sub("tqdm_kwds={.*},", "", repr_, flags=re.S)
+        # remove empty lines
+        repr_ = re.sub("\n *\n", "\n", repr_, flags=re.S)
+        # remove extra whitespaces after a comma
+        repr_ = re.sub(", +", ", ", repr_)
+        return repr_
