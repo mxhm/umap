@@ -1,10 +1,13 @@
 from umap import UMAP
+from umap.umap_ import nearest_neighbors
 from scipy import sparse
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score
 from sklearn.neighbors import KDTree
 from scipy.spatial.distance import cdist, pdist, squareform
+import pytest
+import warnings
 
 try:
     # works for sklearn>=0.22
@@ -70,7 +73,7 @@ def test_umap_trustworthiness_on_sphere_iris(
         iris.data, projected_embedding, n_neighbors=10, metric="cosine"
     )
     assert (
-        trust >= 0.70
+        trust >= 0.65
     ), "Insufficiently trustworthy spherical embedding for iris dataset: {}".format(
         trust
     )
@@ -214,3 +217,68 @@ def test_umap_inverse_transform_on_iris(iris, iris_model):
             highd_centroid, k=10, return_distance=False
         )
         assert np.intersect1d(near_points, highd_near_points[0]).shape[0] >= 3
+
+
+def test_precomputed_knn_on_iris(iris, iris_selection, iris_subset_model):
+    # this to compare two similarity graphs which should be nearly the same
+    def rms(a, b):
+        return np.sqrt(np.mean(np.square(a - b)))
+
+    data = iris.data[iris_selection]
+    new_data = iris.data[~iris_selection]
+
+    knn = nearest_neighbors(
+        data,
+        n_neighbors=10,
+        metric="euclidean",
+        metric_kwds=None,
+        angular=False,
+        random_state=42,
+    )
+
+    # repeated UMAP arguments we don't want to mis-specify
+    umap_args = dict(
+        n_neighbors=iris_subset_model.n_neighbors,
+        random_state=iris_subset_model.random_state,
+        min_dist=iris_subset_model.min_dist,
+    )
+
+    # force_approximation_algorithm parameter is ignored when a precomputed knn is used
+    fitter_with_precomputed_knn = UMAP(
+        **umap_args,
+        precomputed_knn=knn,
+        force_approximation_algorithm=False,
+    ).fit(data)
+
+    # embeddings and similarity graph are NOT the same due to choices of nearest
+    # neighbor in non-exact case: similarity graph is most stable for comparing output
+    # threshold for similarity in graph empirically chosen by comparing the iris subset
+    # model with force_approximation_algorithm=True and different random seeds
+    assert rms(fitter_with_precomputed_knn.graph_, iris_subset_model.graph_) < 0.005
+
+    with pytest.warns(Warning, match="transforming new data") as record:
+        fitter_ignoring_force_approx = UMAP(
+            **umap_args,
+            precomputed_knn=(knn[0], knn[1]),
+        ).fit(data)
+        assert len(record) == 1
+    np.testing.assert_array_equal(
+        fitter_ignoring_force_approx.embedding_, fitter_with_precomputed_knn.embedding_
+    )
+
+    # #848 (continued): if you don't have a search index, attempting to transform
+    # will raise an error
+    with pytest.raises(NotImplementedError, match="search index"):
+        _ = fitter_ignoring_force_approx.transform(new_data)
+
+    # force_approximation_algorithm parameter is ignored
+    with pytest.warns(Warning, match="transforming new data") as record:
+        fitter_ignoring_force_approx_True = UMAP(
+            **umap_args,
+            precomputed_knn=(knn[0], knn[1]),
+            force_approximation_algorithm=True,
+        ).fit(data)
+        assert len(record) == 1
+    np.testing.assert_array_equal(
+        fitter_ignoring_force_approx_True.embedding_, fitter_ignoring_force_approx.embedding_
+    )

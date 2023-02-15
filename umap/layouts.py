@@ -176,7 +176,7 @@ def _optimize_layout_euclidean_single_epoch(
                     if grad_coeff > 0.0:
                         grad_d = clip(grad_coeff * (current[d] - other[d]))
                     else:
-                        grad_d = 4.0
+                        grad_d = 0
                     current[d] += grad_d * alpha
 
             epoch_of_next_negative_sample[i] += (
@@ -256,8 +256,12 @@ def optimize_layout_euclidean(
         The indices of the heads of 1-simplices with non-zero membership.
     tail: array of shape (n_1_simplices)
         The indices of the tails of 1-simplices with non-zero membership.
-    n_epochs: int
-        The number of training epochs to use in optimization.
+    n_epochs: int, or list of int
+        The number of training epochs to use in optimization, or a list of
+        epochs at which to save the embedding. In case of a list, the optimization
+        will use the maximum number of epochs in the list, and will return a list
+        of embedding in the order of increasing epoch, regardless of the order in
+        the epoch list.
     n_vertices: int
         The number of vertices (0-simplices) in the dataset.
     epochs_per_sample: array of shape (n_1_simplices)
@@ -332,6 +336,12 @@ def optimize_layout_euclidean(
         dens_phi_sum = np.zeros(1, dtype=np.float32)
         dens_re_sum = np.zeros(1, dtype=np.float32)
 
+    epochs_list = None
+    embedding_list = []
+    if isinstance(n_epochs, list):
+        epochs_list = n_epochs
+        n_epochs = max(epochs_list)
+
     if "disable" not in tqdm_kwds:
         tqdm_kwds["disable"] = not verbose
 
@@ -398,7 +408,17 @@ def optimize_layout_euclidean(
 
         alpha = initial_alpha * (1.0 - (float(n) / float(n_epochs)))
 
-    return head_embedding
+        if verbose and n % int(n_epochs / 10) == 0:
+            print("\tcompleted ", n, " / ", n_epochs, "epochs")
+
+        if epochs_list is not None and n in epochs_list:
+            embedding_list.append(head_embedding.copy())
+
+    # Add the last embedding to the list as well
+    if epochs_list is not None:
+        embedding_list.append(head_embedding.copy())
+
+    return head_embedding if epochs_list is None else embedding_list
 
 
 def _optimize_layout_generic_single_epoch(
@@ -906,7 +926,7 @@ def _optimize_layout_aligned_euclidean_single_epoch(
                             if n_embeddings > neighbor_m >= 0 != offset:
                                 identified_index = relations[m, offset + window_size, k]
                                 if identified_index >= 0:
-                                    grad_d -= clip(
+                                    other_grad_d -= clip(
                                         (lambda_ * np.exp(-(np.abs(offset) - 1)))
                                         * regularisation_weights[
                                             m, offset + window_size, k
@@ -952,7 +972,7 @@ def _optimize_layout_aligned_euclidean_single_epoch(
                         if grad_coeff > 0.0:
                             grad_d = clip(grad_coeff * (current[d] - other[d]))
                         else:
-                            grad_d = 4.0
+                            grad_d = 0.0
 
                         for offset in range(-window_size, window_size):
                             neighbor_m = m + offset

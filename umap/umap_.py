@@ -14,6 +14,7 @@ from sklearn.utils.validation import check_is_fitted
 from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import normalize
 from sklearn.neighbors import KDTree
+from sklearn.decomposition import PCA, TruncatedSVD
 
 try:
     import joblib
@@ -157,7 +158,7 @@ def smooth_knn_dist(distances, k, n_iter=64, local_connectivity=1.0, bandwidth=1
     Parameters
     ----------
     distances: array of shape (n_samples, n_neighbors)
-        Distances to nearest neighbors for each samples. Each row should be a
+        Distances to nearest neighbors for each sample. Each row should be a
         sorted list of distances to a given samples nearest neighbors.
 
     k: float
@@ -302,7 +303,7 @@ def nearest_neighbors(
         The distances to the ``n_neighbors`` closest points in the dataset.
 
     rp_forest: list of trees
-        The random projection forest used for searching (if used, None otherwise)
+        The random projection forest used for searching (if used, None otherwise).
     """
     if verbose:
         print(ts(), "Finding Nearest Neighbors")
@@ -384,10 +385,10 @@ def compute_membership_strengths(
         The local connectivity adjustment.
 
     return_dists: bool (optional, default False)
-        Whether to return the pairwise distance associated with each edge
+        Whether to return the pairwise distance associated with each edge.
 
     bipartite: bool (optional, default False)
-        Does the nearest neighbour set represent a bipartite graph?  That is are the
+        Does the nearest neighbour set represent a bipartite graph? That is, are the
         nearest neighbour indices from the same point set as the row indices?
 
     Returns
@@ -480,30 +481,31 @@ def fuzzy_simplicial_set(
         returns a float can be provided. For performance purposes it is
         required that this be a numba jit'd function. Valid string metrics
         include:
-            * euclidean (or l2)
-            * manhattan (or l1)
-            * cityblock
-            * braycurtis
-            * canberra
-            * chebyshev
-            * correlation
-            * cosine
-            * dice
-            * hamming
-            * jaccard
-            * kulsinski
-            * ll_dirichlet
-            * mahalanobis
-            * matching
-            * minkowski
-            * rogerstanimoto
-            * russellrao
-            * seuclidean
-            * sokalmichener
-            * sokalsneath
-            * sqeuclidean
-            * yule
-            * wminkowski
+
+        * euclidean (or l2)
+        * manhattan (or l1)
+        * cityblock
+        * braycurtis
+        * canberra
+        * chebyshev
+        * correlation
+        * cosine
+        * dice
+        * hamming
+        * jaccard
+        * kulsinski
+        * ll_dirichlet
+        * mahalanobis
+        * matching
+        * minkowski
+        * rogerstanimoto
+        * russellrao
+        * seuclidean
+        * sokalmichener
+        * sokalsneath
+        * sqeuclidean
+        * yule
+        * wminkowski
 
         Metrics that take arguments (such as minkowski, mahalanobis etc.)
         can have arguments passed via the metric_kwds dictionary. At this
@@ -905,7 +907,7 @@ def make_epochs_per_sample(weights, n_epochs):
     Parameters
     ----------
     weights: array of shape (n_1_simplices)
-        The weights ofhow much we wish to sample each 1-simplex.
+        The weights of how much we wish to sample each 1-simplex.
 
     n_epochs: int
         The total number of epochs we want to train for.
@@ -916,8 +918,18 @@ def make_epochs_per_sample(weights, n_epochs):
     """
     result = -1.0 * np.ones(weights.shape[0], dtype=np.float64)
     n_samples = n_epochs * (weights / weights.max())
-    result[n_samples > 0] = float(n_epochs) / n_samples[n_samples > 0]
+    result[n_samples > 0] = float(n_epochs) / np.float64(n_samples[n_samples > 0])
     return result
+
+
+# scale coords so that the largest coordinate is max_coords, then add normal-distributed
+# noise with standard deviation noise
+def noisy_scale_coords(coords, random_state, max_coord=10.0, noise=0.0001):
+    expansion = max_coord / np.abs(coords).max()
+    coords = (coords * expansion).astype(np.float32)
+    return coords + random_state.normal(scale=noise, size=coords.shape).astype(
+        np.float32
+    )
 
 
 def simplicial_set_embedding(
@@ -980,16 +992,21 @@ def simplicial_set_embedding(
         in greater repulsive force being applied, greater optimization
         cost, but slightly more accuracy.
 
-    n_epochs: int (optional, default 0)
+    n_epochs: int (optional, default 0), or list of int
         The number of training epochs to be used in optimizing the
         low dimensional embedding. Larger values result in more accurate
         embeddings. If 0 is specified a value will be selected based on
         the size of the input dataset (200 for large datasets, 500 for small).
+        If a list of int is specified, then the intermediate embeddings at the
+        different epochs specified in that list are returned in
+        ``aux_data["embedding_list"]``.
 
     init: string
         How to initialize the low dimensional embedding. Options are:
+
             * 'spectral': use a spectral embedding of the fuzzy 1-skeleton
             * 'random': assign initial embedding positions at random.
+            * 'pca': use the first n_components from PCA applied to the input data.
             * A numpy array of initial embedding positions.
 
     random_state: numpy RandomState or equivalent
@@ -1062,8 +1079,11 @@ def simplicial_set_embedding(
     if n_epochs is None:
         n_epochs = default_epochs
 
-    if n_epochs > 10:
-        graph.data[graph.data < (graph.data.max() / float(n_epochs))] = 0.0
+    # If n_epoch is a list, get the maximum epoch to reach
+    n_epochs_max = max(n_epochs) if isinstance(n_epochs, list) else n_epochs
+
+    if n_epochs_max > 10:
+        graph.data[graph.data < (graph.data.max() / float(n_epochs_max))] = 0.0
     else:
         graph.data[graph.data < (graph.data.max() / float(default_epochs))] = 0.0
 
@@ -1073,9 +1093,17 @@ def simplicial_set_embedding(
         embedding = random_state.uniform(
             low=-10.0, high=10.0, size=(graph.shape[0], n_components)
         ).astype(np.float32)
+    elif isinstance(init, str) and init == "pca":
+        if scipy.sparse.issparse(data):
+            pca = TruncatedSVD(n_components=n_components, random_state=random_state)
+        else:
+            pca = PCA(n_components=n_components, random_state=random_state)
+        embedding = pca.fit_transform(data).astype(np.float32)
+        embedding = noisy_scale_coords(
+            embedding, random_state, max_coord=10, noise=0.0001
+        )
     elif isinstance(init, str) and init == "spectral":
-        # We add a little noise to avoid local minima for optimization to come
-        initialisation = spectral_layout(
+        embedding = spectral_layout(
             data,
             graph,
             n_components,
@@ -1083,13 +1111,9 @@ def simplicial_set_embedding(
             metric=metric,
             metric_kwds=metric_kwds,
         )
-        expansion = 10.0 / np.abs(initialisation).max()
-        embedding = (initialisation * expansion).astype(
-            np.float32
-        ) + random_state.normal(
-            scale=0.0001, size=[graph.shape[0], n_components]
-        ).astype(
-            np.float32
+        # We add a little noise to avoid local minima for optimization to come
+        embedding = noisy_scale_coords(
+            embedding, random_state, max_coord=10, noise=0.0001
         )
     else:
         init_data = np.array(init)
@@ -1104,7 +1128,7 @@ def simplicial_set_embedding(
             else:
                 embedding = init_data
 
-    epochs_per_sample = make_epochs_per_sample(graph.data, n_epochs)
+    epochs_per_sample = make_epochs_per_sample(graph.data, n_epochs_max)
 
     head = graph.row
     tail = graph.col
@@ -1195,6 +1219,11 @@ def simplicial_set_embedding(
             tqdm_kwds=tqdm_kwds,
             move_other=True,
         )
+
+    if isinstance(embedding, list):
+        aux_data["embedding_list"] = embedding
+        embedding = embedding[-1].copy()
+
     if output_dens:
         if verbose:
             print(ts() + " Computing embedding densities")
@@ -1288,7 +1317,7 @@ def init_transform(indices, weights, embedding):
 
 def init_graph_transform(graph, embedding):
     """Given a bipartite graph representing the 1-simplices and strengths between the
-     new points and the original data set along with an embedding of the original points
+    new points and the original data set along with an embedding of the original points
     initialize the positions of new points relative to the strengths (of their neighbors in the source data).
 
     If a point is in our original data set it embeds at the original points coordinates.
@@ -1298,7 +1327,7 @@ def init_graph_transform(graph, embedding):
     Parameters
     ----------
     graph: csr_matrix (n_new_samples, n_samples)
-        A matrix indicating the the 1-simplices and their associated strengths.  These strengths should
+        A matrix indicating the 1-simplices and their associated strengths.  These strengths should
         be values between zero and one and not normalized.  One indicating that the new point was identical
         to one of our original points.
 
@@ -1313,22 +1342,18 @@ def init_graph_transform(graph, embedding):
     result = np.zeros((graph.shape[0], embedding.shape[1]), dtype=np.float32)
 
     for row_index in range(graph.shape[0]):
-        num_neighbours = len(graph[row_index].indices)
-        if num_neighbours == 0:
+        graph_row = graph[row_index]
+        if graph_row.nnz == 0:
             result[row_index] = np.nan
             continue
-        row_sum = np.sum(graph[row_index])
-        for col_index in graph[row_index].indices:
-            if graph[row_index, col_index] == 1:
+        row_sum = graph_row.sum()
+        for graph_value, col_index in zip(graph_row.data, graph_row.indices):
+            if graph_value == 1:
                 result[row_index, :] = embedding[col_index, :]
                 break
-            for d in range(embedding.shape[1]):
-                result[row_index, d] += (
-                    graph[row_index, col_index] / row_sum * embedding[col_index, d]
-                )
+            result[row_index] += graph_value / row_sum * embedding[col_index]
 
     return result
-
 
 @numba.njit()
 def init_update(current_init, n_original_samples, indices):
@@ -1390,29 +1415,31 @@ class UMAP(BaseEstimator):
         returns a float can be provided. For performance purposes it is
         required that this be a numba jit'd function. Valid string metrics
         include:
-            * euclidean
-            * manhattan
-            * chebyshev
-            * minkowski
-            * canberra
-            * braycurtis
-            * mahalanobis
-            * wminkowski
-            * seuclidean
-            * cosine
-            * correlation
-            * haversine
-            * hamming
-            * jaccard
-            * dice
-            * russelrao
-            * kulsinski
-            * ll_dirichlet
-            * hellinger
-            * rogerstanimoto
-            * sokalmichener
-            * sokalsneath
-            * yule
+
+        * euclidean
+        * manhattan
+        * chebyshev
+        * minkowski
+        * canberra
+        * braycurtis
+        * mahalanobis
+        * wminkowski
+        * seuclidean
+        * cosine
+        * correlation
+        * haversine
+        * hamming
+        * jaccard
+        * dice
+        * russelrao
+        * kulsinski
+        * ll_dirichlet
+        * hellinger
+        * rogerstanimoto
+        * sokalmichener
+        * sokalsneath
+        * yule
+
         Metrics that take arguments (such as minkowski, mahalanobis etc.)
         can have arguments passed via the metric_kwds dictionary. At this
         time care must be taken and dictionary elements must be ordered
@@ -1429,8 +1456,10 @@ class UMAP(BaseEstimator):
 
     init: string (optional, default 'spectral')
         How to initialize the low dimensional embedding. Options are:
+
             * 'spectral': use a spectral embedding of the fuzzy 1-skeleton
             * 'random': assign initial embedding positions at random.
+            * 'pca': use the first n_components from PCA applied to the input data.
             * A numpy array of initial embedding positions.
 
     min_dist: float (optional, default 0.1)
@@ -1478,7 +1507,7 @@ class UMAP(BaseEstimator):
         cost, but slightly more accuracy.
 
     transform_queue_size: float (optional, default 4.0)
-        For transform operations (embedding new points using a trained model_
+        For transform operations (embedding new points using a trained model
         this will control how aggressively to search for nearest neighbors.
         Larger values will result in slower performance but more accurate
         nearest neighbor evaluation.
@@ -1596,7 +1625,15 @@ class UMAP(BaseEstimator):
         neighbors in the precomputed_knn must be greater or equal to the
         n_neighbors parameter. This should be a tuple containing the output
         of the nearest_neighbors() function or attributes from a previously fit
-        UMAP object; (knn_indices, knn_dists,knn_search_index).
+        UMAP object; (knn_indices, knn_dists, knn_search_index). If you wish to use
+        k-nearest neighbors data calculated by another package then provide a tuple of
+        the form (knn_indices, knn_dists). The contents of the tuple should be two numpy
+        arrays of shape (N, n_neighbors) where N is the number of items in the
+        input data. The first array should be the integer indices of the nearest
+        neighbors, and the second array should be the corresponding distances. The
+        nearest neighbor of each item should be itself, e.g. the nearest neighbor of
+        item 0 should be 0, the nearest neighbor of item 1 is 1 and so on. Please note
+        that you will *not* be able to transform new data in this case.
     """
 
     def __init__(
@@ -1698,10 +1735,11 @@ class UMAP(BaseEstimator):
         if not isinstance(self.init, str) and not isinstance(self.init, np.ndarray):
             raise ValueError("init must be a string or ndarray")
         if isinstance(self.init, str) and self.init not in (
+            "pca",
             "spectral",
             "random",
         ):
-            raise ValueError('string init values must be "spectral" or "random"')
+            raise ValueError('string init values must be "pca", "spectral" or "random"')
         if (
             isinstance(self.init, np.ndarray)
             and self.init.shape[1] != self.n_components
@@ -1730,10 +1768,19 @@ class UMAP(BaseEstimator):
                 raise ValueError("n_components must be an int")
         if self.n_components < 1:
             raise ValueError("n_components must be greater than 0")
-        if self.n_epochs is not None and (
-            self.n_epochs < 0 or not isinstance(self.n_epochs, int)
+        self.n_epochs_list = None
+        if isinstance(self.n_epochs, list) or isinstance(self.n_epochs, tuple) or \
+                isinstance(self.n_epochs, np.ndarray):
+            if not issubclass(np.array(self.n_epochs).dtype.type, np.integer) or \
+                    not np.all(np.array(self.n_epochs) >= 0):
+                raise ValueError("n_epochs must be a nonnegative integer "
+                                 "or a list of nonnegative integers")
+            self.n_epochs_list = list(self.n_epochs)
+        elif self.n_epochs is not None and (
+                self.n_epochs < 0 or not isinstance(self.n_epochs, int)
         ):
-            raise ValueError("n_epochs must be a nonnegative integer")
+            raise ValueError("n_epochs must be a nonnegative integer "
+                             "or a list of nonnegative integers")
         if self.metric_kwds is None:
             self._metric_kwds = {}
         else:
@@ -1926,10 +1973,12 @@ class UMAP(BaseEstimator):
                     "precomputed_knn[0] and precomputed_knn[1]"
                     " must be numpy arrays of the same size."
                 )
+            # #848: warn but proceed if no search index is present
             if not isinstance(self.knn_search_index, NNDescent):
-                raise ValueError(
-                    "precomputed_knn[2] (knn_search_index)"
-                    " must be an NNDescent object."
+                warn(
+                    "precomputed_knn[2] (knn_search_index) "
+                    "is not an NNDescent object: transforming new data with transform "
+                    "will be unavailable."
                 )
             if self.knn_dists.shape[1] < self.n_neighbors:
                 warn(
@@ -1953,11 +2002,9 @@ class UMAP(BaseEstimator):
                 self.knn_dists.shape[0] < 4096
                 and not self.force_approximation_algorithm
             ):
-                warn(
-                    "precomputed_knn is meant for large datasets. Since your"
-                    " data is small, precomputed_knn will be ignored and the"
-                    " k-nn will be computed normally."
-                )
+                # force_approximation_algorithm is irrelevant for pre-computed knn
+                # always set it to True which keeps downstream code paths working
+                self.force_approximation_algorithm = True
             elif self.knn_dists.shape[1] > self.n_neighbors:
                 # if k for precomputed_knn larger than n_neighbors we simply prune it
                 self.knn_indices = self.knn_indices[:, : self.n_neighbors]
@@ -2285,7 +2332,11 @@ class UMAP(BaseEstimator):
 
         self.knn_indices = self.precomputed_knn[0]
         self.knn_dists = self.precomputed_knn[1]
-        self.knn_search_index = self.precomputed_knn[2]
+        # #848: allow precomputed knn to not have a search index
+        if len(self.precomputed_knn) == 2:
+            self.knn_search_index = None
+        else:
+            self.knn_search_index = self.precomputed_knn[2]
 
         self._validate_parameters()
 
@@ -2486,7 +2537,7 @@ class UMAP(BaseEstimator):
                 self.verbose,
                 self.densmap or self.output_dens,
             )
-            # Report the number of vertices with degree 0 in our our umap.graph_
+            # Report the number of vertices with degree 0 in our umap.graph_
             # This ensures that they were properly disconnected.
             vertices_disconnected = np.sum(
                 np.array(self.graph_.sum(axis=1)).flatten() == 0
@@ -2555,7 +2606,7 @@ class UMAP(BaseEstimator):
                 self.verbose,
                 self.densmap or self.output_dens,
             )
-            # Report the number of vertices with degree 0 in our our umap.graph_
+            # Report the number of vertices with degree 0 in our umap.graph_
             # This ensures that they were properly disconnected.
             vertices_disconnected = np.sum(
                 np.array(self.graph_.sum(axis=1)).flatten() == 0
@@ -2681,12 +2732,22 @@ class UMAP(BaseEstimator):
             print(ts(), "Construct embedding")
 
         if self.transform_mode == "embedding":
+            epochs = self.n_epochs_list if self.n_epochs_list is not None else self.n_epochs
             self.embedding_, aux_data = self._fit_embed_data(
                 self._raw_data[index],
-                self.n_epochs,
+                epochs,
                 init,
                 random_state,  # JH why raw data?
             )
+
+            if self.n_epochs_list is not None:
+                if "embedding_list" not in aux_data:
+                    raise KeyError("No list of embedding were found in 'aux_data'. "
+                                   "It is likely the layout optimization function "
+                                   "doesn't support the list of int for 'n_epochs'.")
+                else:
+                    self.embedding_list_ = [e[inverse] for e in aux_data["embedding_list"]]
+
             # Assign any points that are fully disconnected from our manifold(s) to have embedding
             # coordinates of np.nan.  These will be filtered by our plotting functions automatically.
             # They also prevent users from being deceived a distance query to one of these points.
@@ -2820,6 +2881,14 @@ class UMAP(BaseEstimator):
         if self.densmap:
             raise NotImplementedError(
                 "Transforming data into an existing embedding not supported for densMAP."
+            )
+
+        # #848: knn_search_index is allowed to be None if not transforming new data,
+        # so now we must validate that if it exists it is not None
+        if hasattr(self, "_knn_search_index") and self._knn_search_index is None:
+            raise NotImplementedError(
+                "No search index available: transforming data"
+                " into an existing embedding is not supported"
             )
 
         # X = check_array(X, dtype=np.float32, order="C", accept_sparse="csr")
@@ -3380,6 +3449,17 @@ class UMAP(BaseEstimator):
         if self.output_dens:
             self.rad_orig_ = aux_data["rad_orig"]
             self.rad_emb_ = aux_data["rad_emb"]
+
+    def get_feature_names_out(self, feature_names_out=None):
+        """
+        Defines descriptive names for each output of the (fitted) estimator.
+        :param feature_names_out: Optional passthrough for feature names.
+        By default, feature names will be generated automatically.
+        :return: List of descriptive names for each output variable from the fitted estimator.
+        """
+        if feature_names_out is None:
+            feature_names_out = [f"umap_component_{i+1}" for i in range(self.n_components)]
+        return feature_names_out
 
     def __repr__(self):
         from sklearn.utils._pprint import _EstimatorPrettyPrinter

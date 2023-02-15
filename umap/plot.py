@@ -63,11 +63,11 @@ darkpurple_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
     "darkpurple", colorcet.linear_bmw_5_95_c89
 )
 
-plt.register_cmap("fire", fire_cmap)
-plt.register_cmap("darkblue", darkblue_cmap)
-plt.register_cmap("darkgreen", darkgreen_cmap)
-plt.register_cmap("darkred", darkred_cmap)
-plt.register_cmap("darkpurple", darkpurple_cmap)
+plt.colormaps.register(fire_cmap, name="fire")
+plt.colormaps.register(darkblue_cmap, name="darkblue")
+plt.colormaps.register(darkgreen_cmap, name="darkgreen")
+plt.colormaps.register(darkred_cmap, name="darkred")
+plt.colormaps.register(darkpurple_cmap, name="darkpurple")
 
 
 def _to_hex(arr):
@@ -206,7 +206,8 @@ def _nhood_compare(indices_left, indices_right):
     result = np.empty(indices_left.shape[0])
 
     for i in range(indices_left.shape[0]):
-        intersection_size = np.intersect1d(indices_left[i], indices_right[i]).shape[0]
+        intersection_size = np.intersect1d(indices_left[i], indices_right[i], 
+                                           assume_unique=True).shape[0]
         union_size = np.unique(np.hstack([indices_left[i], indices_right[i]])).shape[0]
         result[i] = float(intersection_size) / float(union_size)
 
@@ -479,6 +480,7 @@ def show(plot_to_show):
 
 def points(
     umap_object,
+    points=None,
     labels=None,
     values=None,
     theme=None,
@@ -489,19 +491,16 @@ def points(
     width=800,
     height=800,
     show_legend=True,
-    show_parameters=True,
     subset_points=None,
     ax=None,
     alpha=None,
-    datashade=None,
-    plot_dimensions=None,
 ):
     """Plot an embedding as points. Currently this only works
     for 2D embeddings. While there are many optional parameters
     to further control and tailor the plotting, you need only
     pass in the trained/fit umap model to get results. This plot
     utility will attempt to do the hard work of avoiding
-    overplotting issues, and make it easy to automatically
+    over-plotting issues, and make it easy to automatically
     colour points by a categorical labelling or numeric values.
 
     This method is intended to be used within a Jupyter
@@ -511,6 +510,12 @@ def points(
     ----------
     umap_object: trained UMAP object
         A trained UMAP object that has a 2D embedding.
+
+    points: array, shape (n_samples, dim) (optional, default None)
+        An array of points to be plotted. Usually this is None
+        and so the original embedding points of the umap_object
+        are used. However points can be passed explicitly instead
+        which is useful for points manually transformed.
 
     labels: array, shape (n_samples,) (optional, default None)
         An array of labels (assumed integer or categorical),
@@ -590,9 +595,6 @@ def points(
     show_legend: bool (optional, default True)
         Whether to display a legend of the labels
 
-    show_parameters: bool (optional, default True)
-        Whether to display parameters of UMAP object
-
     subset_points: array, shape (n_samples,) (optional, default None)
         A way to select a subset of points based on an array of boolean
         values.
@@ -603,14 +605,6 @@ def points(
 
     alpha: float (optional, default: None)
         The alpha blending value, between 0 (transparent) and 1 (opaque).
-
-    datashade: bool (optional, default: None)
-        Plot using datashade or matplotlib, or if None, determine based
-        on number of points and plot size.
-
-    plot_dimensions: tuple (optional, default: None)
-        Plot the specified dimensions of the embedding, of if None, plot
-        the first two dimensions.
 
     Returns
     -------
@@ -638,13 +632,8 @@ def points(
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("Alpha must be between 0 and 1 inclusive")
 
-    if plot_dimensions is None:
-        points = _get_embedding(umap_object)[:, (0, 1)]
-    else:
-        points = _get_embedding(umap_object)[:, plot_dimensions]
-
-    if points.shape[1] != 2:
-        raise ValueError("Plotting is currently only implemented for 2 embedding dimensions")
+    if points is None:
+        points = _get_embedding(umap_object)
 
     if subset_points is not None:
         if len(subset_points) != points.shape[0]:
@@ -660,6 +649,9 @@ def points(
         if values is not None:
             values = values[subset_points]
 
+    if points.shape[1] != 2:
+        raise ValueError("Plotting is currently only implemented for 2D embeddings")
+
     font_color = _select_font_color(background)
 
     if ax is None:
@@ -667,10 +659,7 @@ def points(
         fig = plt.figure(figsize=(width / dpi, height / dpi))
         ax = fig.add_subplot(111)
 
-    if datashade is None:
-        datashade = points.shape[0] > width * height // 10
-
-    if not datashade:
+    if points.shape[0] <= width * height // 10:
         ax = _matplotlib_points(
             points,
             ax,
@@ -708,18 +697,24 @@ def points(
         )
 
     ax.set(xticks=[], yticks=[])
-    if show_parameters:
-        param_text = "UMAP: "
-        if _get_metric(umap_object) != "euclidean":
-            param_text += "metric={}, ".format(_get_metric(umap_object))
-        param_text += "n_neighbors={}, min_dist={}".format(umap_object.n_neighbors, umap_object.min_dist)
-        if plot_dimensions is not None:
-            param_text += ", dimensions={}".format(plot_dimensions)
-
+    if _get_metric(umap_object) != "euclidean":
         ax.text(
             0.99,
             0.01,
-            param_text,
+            "UMAP: metric={}, n_neighbors={}, min_dist={}".format(
+                _get_metric(umap_object), umap_object.n_neighbors, umap_object.min_dist
+            ),
+            transform=ax.transAxes,
+            horizontalalignment="right",
+            color=font_color,
+        )
+    else:
+        ax.text(
+            0.99,
+            0.01,
+            "UMAP: n_neighbors={}, min_dist={}".format(
+                umap_object.n_neighbors, umap_object.min_dist
+            ),
             transform=ax.transAxes,
             horizontalalignment="right",
             color=font_color,
@@ -752,7 +747,7 @@ def connectivity(
     to further control and tailor the plotting, you need only
     pass in the trained/fit umap model to get results. This plot
     utility will attempt to do the hard work of avoiding
-    overplotting issues and provide options for plotting the
+    over-plotting issues and provide options for plotting the
     points as well as using edge bundling for graph visualization.
 
     Parameters
@@ -854,7 +849,7 @@ def connectivity(
     -------
     result: matplotlib axis
         The result is a matplotlib axis with the relevant plot displayed.
-        If you are using a notbooks and have ``%matplotlib inline`` set
+        If you are using a notebook and have ``%matplotlib inline`` set
         then this will simply display inline.
     """
     if theme is not None:
@@ -1015,7 +1010,7 @@ def diagnostic(
         as that which provides ``local_variance_threshold``
         or more of the ``variance_explained_ratio``.
 
-    ax: matlotlib axis (optional, default None)
+    ax: matplotlib axis (optional, default None)
         A matplotlib axis to plot to, or, if None, a new
         axis will be created and returned.
 
@@ -1033,7 +1028,7 @@ def diagnostic(
     -------
     result: matplotlib axis
         The result is a matplotlib axis with the relevant plot displayed.
-        If you are using a notbooks and have ``%matplotlib inline`` set
+        If you are using a notebook and have ``%matplotlib inline`` set
         then this will simply display inline.
     """
 
@@ -1226,6 +1221,7 @@ def interactive(
     labels=None,
     values=None,
     hover_data=None,
+    tools=None,
     theme=None,
     cmap="Blues",
     color_key=None,
@@ -1239,12 +1235,11 @@ def interactive(
     interactive_text_search_columns=None,
     interactive_text_search_alpha_contrast=0.95,
     alpha=None,
-    plot_dimensions=None,
 ):
     """Create an interactive bokeh plot of a UMAP embedding.
     While static plots are useful, sometimes a plot that
     supports interactive zooming, and hover tooltips for
-    individual points is much more desireable. This function
+    individual points is much more desirable. This function
     provides a simple interface for creating such plots. The
     result is a bokeh plot that will be displayed in a notebook.
 
@@ -1280,6 +1275,14 @@ def interactive(
         should be a Series of length ``n_samples`` providing a value
         for each data point. Column names will be used for
         identifying information within the tooltip.
+
+    tools: List (optional, default None),
+        Defines the tools to be configured for interactive plots.
+        The list can be mixed type of string and tools objects defined by
+        Bokeh like HoverTool. Default tool list Bokeh uses is
+        ["pan","wheel_zoom","box_zoom","save","reset","help",].
+        When tools are specified, and includes hovertool, automatic tooltip
+        based on hover_data is not created.
 
     theme: string (optional, default None)
         A color theme to use for plotting. A small set of
@@ -1377,14 +1380,7 @@ def interactive(
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("Alpha must be between 0 and 1 inclusive")
 
-    if plot_dimensions is None:
-        points = _get_embedding(umap_object)[:, (0, 1)]
-    else:
-        points = _get_embedding(umap_object)[:, plot_dimensions]
-
-    if points.shape[1] != 2:
-        raise ValueError("Plotting is currently only implemented for 2 embedding dimensions")
-
+    points = _get_embedding(umap_object)
     if subset_points is not None:
         if len(subset_points) != points.shape[0]:
             raise ValueError(
@@ -1394,10 +1390,13 @@ def interactive(
             )
         points = points[subset_points]
 
-    if point_size is None:
-        point_size = 500.0 / np.sqrt(points.shape[0])
+    if points.shape[1] != 2:
+        raise ValueError("Plotting is currently only implemented for 2D embeddings")
 
-    data = pd.DataFrame(points, columns=("x", "y"))
+    if point_size is None:
+        point_size = 100.0 / np.sqrt(points.shape[0])
+
+    data = pd.DataFrame(_get_embedding(umap_object), columns=("x", "y"))
 
     if labels is not None:
         data["label"] = labels
@@ -1438,17 +1437,20 @@ def interactive(
         if hover_data is not None:
             hover_data = hover_data[subset_points]
 
-    #if points.shape[0] <= width * height // 10:
-    if points.shape[0] <= width * height // 5:
-
+    if points.shape[0] <= width * height // 10:
+        tooltips = None
+        tooltip_needed = True
         if hover_data is not None:
             tooltip_dict = {}
             for col_name in hover_data:
                 data[col_name] = hover_data[col_name]
                 tooltip_dict[col_name] = "@{" + col_name + "}"
             tooltips = list(tooltip_dict.items())
-        else:
-            tooltips = None
+
+            for _tool in tools:
+                if _tool.__class__.__name__ == "HoverTool":
+                    tooltip_needed = False
+                    break
 
         if alpha is not None:
             data["alpha"] = alpha
@@ -1461,7 +1463,8 @@ def interactive(
         plot = bpl.figure(
             width=width,
             height=height,
-            tooltips=tooltips,
+            tooltips=None if not tooltip_needed else tooltips,
+            tools=tools if tools is not None else "pan,wheel_zoom,box_zoom,save,reset,help",
             background_fill_color=background,
         )
         plot.circle(
@@ -1533,16 +1536,16 @@ def interactive(
 
                 plot = column(text_input, plot)
 
-        #bpl.show(plot)
+        # bpl.show(plot)
     else:
         if hover_data is not None:
             warn(
                 "Too many points for hover data -- tooltips will not"
-                "be displayed. Sorry; try subssampling your data."
+                "be displayed. Sorry; try subsampling your data."
             )
         if interactive_text_search:
             warn(
-                "Too many points for text search." "Sorry; try subssampling your data."
+                "Too many points for text search." "Sorry; try subsampling your data."
             )
         if alpha is not None:
             warn("Alpha parameter will not be applied on holoviews plots")
@@ -1599,7 +1602,7 @@ def nearest_neighbour_distribution(umap_object, bins=25, ax=None):
     bins: int (optional, default 25)
         Number of bins to put the points into
 
-    ax: matlotlib axis (optional, default None)
+    ax: matplotlib axis (optional, default None)
         A matplotlib axis to plot to, or, if None, a new
         axis will be created and returned.
 

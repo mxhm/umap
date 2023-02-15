@@ -145,7 +145,7 @@ def csr_unique(matrix, return_index=True, return_inverse=True, return_counts=Tru
     return_index = bool, optional
         If true, return the row indices of 'matrix'
     return_inverse: bool, optional
-        If true, return the the indices of the unique array that can be
+        If true, return the indices of the unique array that can be
            used to reconstruct 'matrix'.
     return_counts = bool, optional
         If true, returns the number of times each unique item appears in 'matrix'
@@ -156,7 +156,7 @@ def csr_unique(matrix, return_index=True, return_inverse=True, return_counts=Tru
     unique_matrix[inverse]
     """
     lil_matrix = matrix.tolil()
-    rows = [x + y for x, y in zip(lil_matrix.rows, lil_matrix.data)]
+    rows = np.asarray([tuple(x + y) for x, y in zip(lil_matrix.rows, lil_matrix.data)], dtype=object)
     return_values = return_counts + return_inverse + return_index
     return np.unique(
         rows,

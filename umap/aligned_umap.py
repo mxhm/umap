@@ -16,7 +16,7 @@ INT32_MAX = np.iinfo(np.int32).max - 1
 @numba.njit(parallel=True)
 def in1d(arr, test_set):
     test_set = set(test_set)
-    result = np.empty(arr.shape[0], dtype=np.uint8)
+    result = np.empty(arr.shape[0], dtype=np.bool_)
     for i in numba.prange(arr.shape[0]):
         if arr[i] in test_set:
             result[i] = True
@@ -63,7 +63,7 @@ def expand_relations(relation_dicts, window_size=3):
                 mapping = np.arange(max_n_samples)
                 for k in range(j + 1):
                     mapping = np.array(
-                        [relation_dicts[i + j].get(n, -1) for n in mapping]
+                        [relation_dicts[i + k].get(n, -1) for n in mapping]
                     )
                 result[i, result_index] = mapping
 
@@ -73,9 +73,9 @@ def expand_relations(relation_dicts, window_size=3):
                 result[i, result_index] = np.full(max_n_samples, -1, dtype=np.int32)
             else:
                 mapping = np.arange(max_n_samples)
-                for k in range(np.abs(j) + 1):
+                for k in range(0, j - 1, -1):
                     mapping = np.array(
-                        [reverse_relation_dicts[i + j - 1].get(n, -1) for n in mapping]
+                        [reverse_relation_dicts[i + k - 1].get(n, -1) for n in mapping]
                     )
                 result[i, result_index] = mapping
 
@@ -103,7 +103,8 @@ def build_neighborhood_similarities(graphs_indptr, graphs_indices, relations):
                 raw_base_graph_indices = base_graph_indices[
                     base_graph_indptr[k] : base_graph_indptr[k + 1]
                 ].copy()
-                base_indices = relations[i, j][raw_base_graph_indices]
+                base_indices = relations[i, j][raw_base_graph_indices[
+                    raw_base_graph_indices < relations.shape[2]]]
                 base_indices = base_indices[base_indices >= 0]
                 comparison_indices = comparison_graph_indices[
                     comparison_graph_indptr[comparison_index] : comparison_graph_indptr[
